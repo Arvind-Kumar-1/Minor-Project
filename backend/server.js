@@ -410,6 +410,17 @@ wss.on('connection', (ws) => {
   // Send peer updates every 5 seconds
   const interval = setInterval(async () => {
     try {
+      if (!ipfsAvailable) {
+        // Demo mode - send empty peers with demo flag
+        ws.send(JSON.stringify({
+          type: 'peers',
+          data: [],
+          count: 0,
+          demoMode: true
+        }));
+        return;
+      }
+
       const peers = await ipfs.swarm.peers();
       ws.send(JSON.stringify({
         type: 'peers',
