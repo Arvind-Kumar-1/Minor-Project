@@ -5,6 +5,7 @@ import Marketplace from './components/Marketplace';
 import Dashboard from './components/Dashboard';
 import MyFiles from './components/MyFiles';
 import UploadModal from './components/UploadModal';
+import ResearchBenchmarks from './components/ResearchBenchmarks';
 import { connectWallet, formatAddress } from './utils/web3';
 import { getIPFSInfo } from './utils/ipfs';
 
@@ -144,6 +145,12 @@ function App() {
                 />
               } 
             />
+            <Route 
+              path="/benchmarks" 
+              element={
+                <ResearchBenchmarks />
+              } 
+            />
           </Routes>
         </main>
 
@@ -187,6 +194,12 @@ function Navigation() {
         className={`nav-link ${location.pathname === '/my-files' ? 'active' : ''}`}
       >
         My Files
+      </Link>
+      <Link 
+        to="/benchmarks" 
+        className={`nav-link ${location.pathname === '/benchmarks' ? 'active' : ''}`}
+      >
+        🧪 Benchmarks
       </Link>
     </div>
   );

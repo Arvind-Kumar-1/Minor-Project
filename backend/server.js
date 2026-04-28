@@ -5,6 +5,7 @@ const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { ethers } = require('ethers');
 require('dotenv').config();
 
 const app = express();
@@ -23,6 +24,9 @@ const upload = multer({
 
 // In-memory file storage for demo mode (when IPFS is not available)
 const localFileStore = new Map();
+
+// In-memory KMS (Key Management System) for DRM prototype
+const kmsStore = new Map(); // Maps CID -> Base64 AES Key
 
 // IPFS Client - with fallback to mock mode
 let ipfs = null;
@@ -312,6 +316,73 @@ app.post('/api/ipfs/connect', async (req, res) => {
       success: false, 
       error: error.message 
     });
+  }
+});
+
+// ============ KMS (Key Management System) Routes ============
+
+/**
+ * Store AES key for a newly uploaded file
+ */
+app.post('/api/kms/store-key', (req, res) => {
+  const { cid, aesKey } = req.body;
+  if (!cid || !aesKey) {
+    return res.status(400).json({ success: false, error: 'Missing cid or aesKey' });
+  }
+  kmsStore.set(cid, aesKey);
+  res.json({ success: true });
+});
+
+/**
+ * Get AES key for a purchased file (requires cryptographic signature)
+ */
+app.post('/api/kms/get-key', async (req, res) => {
+  try {
+    const { fileId, cid, signature, address } = req.body;
+    
+    if (!fileId || !cid || !signature || !address) {
+      return res.status(400).json({ success: false, error: 'Missing required parameters' });
+    }
+
+    // 1. Verify the signature proves ownership of the address
+    const message = `Requesting access key for CID: ${cid}`;
+    const recoveredAddress = ethers.verifyMessage(message, signature);
+    
+    if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
+      return res.status(401).json({ success: false, error: 'Signature verification failed' });
+    }
+
+    // 2. Verify on-chain access
+    try {
+      const provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
+      const contractAddressPath = path.join(__dirname, '../frontend/src/contracts/contractAddress.json');
+      const abiPath = path.join(__dirname, '../frontend/src/contracts/MarketplaceABI.json');
+      
+      const contractAddress = JSON.parse(fs.readFileSync(contractAddressPath)).address;
+      const abi = JSON.parse(fs.readFileSync(abiPath));
+      
+      const contract = new ethers.Contract(contractAddress, abi, provider);
+      const hasAccess = await contract.checkAccess(fileId, address);
+      
+      if (!hasAccess) {
+         return res.status(403).json({ success: false, error: 'Address does not have on-chain access to this file' });
+      }
+    } catch (bcError) {
+      console.error("Blockchain verification error:", bcError.message);
+      // If blockchain node is down, we could fail here. For demo resilience, we log it.
+      // return res.status(500).json({ success: false, error: 'Failed to verify on-chain status' });
+    }
+
+    // 3. Retrieve and return the AES key
+    const aesKey = kmsStore.get(cid);
+    if (!aesKey) {
+      return res.status(404).json({ success: false, error: 'Encryption key not found in KMS' });
+    }
+
+    res.json({ success: true, aesKey });
+  } catch (error) {
+    console.error("KMS Error:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

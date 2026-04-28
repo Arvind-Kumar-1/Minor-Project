@@ -10,6 +10,12 @@ artifacts/
 cache/
 typechain-types/
 
+# IPFS Data (CRITICAL: Do not push repo locks or data)
+ipfs-network/node1/
+ipfs-network/node2/
+ipfs-network/*.key
+!ipfs-network/swarm.key
+
 # Environment files
 .env
 .env.local
@@ -17,30 +23,31 @@ typechain-types/
 .env.test.local
 .env.production.local
 
-# IPFS data
-ipfs-network/node1/
-ipfs-network/node2/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
 
 # Logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.log
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# OS
 .DS_Store
 Thumbs.db
 
-# Test
-coverage/
-
-# Misc
-*.log
+# Project Specific
 uploads/
+*.encrypted
 benchmark_results.json
 benchmark_results.png
+coverage/

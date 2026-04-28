@@ -129,3 +129,64 @@ export function formatBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+/**
+ * Split a file into chunks and upload sequentially or in small batches
+ * @param {Blob|File} file - The file to chunk
+ * @param {Function} onProgress - Progress callback
+ * @param {number} chunkSize - Size of each chunk in bytes (default 2MB)
+ */
+export async function uploadChunksToIPFS(file, onProgress, chunkSize = 2 * 1024 * 1024) {
+  const totalChunks = Math.ceil(file.size / chunkSize);
+  const chunkCIDs = [];
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, file.size);
+    const chunkBlob = file.slice(start, end);
+    const chunkFile = new File([chunkBlob], `chunk-${i}`, { type: 'application/octet-stream' });
+    
+    // Upload chunk
+    if (onProgress) onProgress(`Uploading chunk ${i + 1}/${totalChunks}...`);
+    const result = await uploadToIPFS(chunkFile);
+    if (!result.success) throw new Error(`Failed to upload chunk ${i}`);
+    chunkCIDs.push(result.cid);
+  }
+  
+  return chunkCIDs;
+}
+
+/**
+ * Download chunks in parallel and assemble them
+ * @param {string[]} chunkCIDs - Array of CIDs
+ * @param {Function} onProgress - Callback indicating completed chunks
+ */
+export async function downloadChunksParallel(chunkCIDs, onProgress) {
+  let completed = 0;
+  
+  const downloadChunk = async (cid, index) => {
+    const response = await fetch(`${BACKEND_URL}/api/ipfs/download/${cid}`);
+    if (!response.ok) throw new Error(`Failed to download chunk ${index}`);
+    const blob = await response.blob();
+    return { index, blob };
+  };
+
+  // Launch all requests in parallel
+  // In a production app with hundreds of chunks, you would use a concurrency pool.
+  const promises = chunkCIDs.map((cid, i) => {
+    return downloadChunk(cid, i).then(res => {
+      completed++;
+      if (onProgress) onProgress(completed, chunkCIDs.length);
+      return res;
+    });
+  });
+
+  const results = await Promise.all(promises);
+  
+  // Sort chunks back into original order
+  results.sort((a, b) => a.index - b.index);
+  const blobs = results.map(r => r.blob);
+  
+  // Reassemble the blob
+  return new Blob(blobs);
+}

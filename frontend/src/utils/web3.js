@@ -214,3 +214,13 @@ export async function uploadFile(contract, cid, title, description, previewImage
   await tx.wait();
   return tx;
 }
+
+/**
+ * Sign a message using MetaMask for DRM verification
+ */
+export async function signMessage(message) {
+  if (!window.ethereum) throw new Error('MetaMask not installed');
+  const provider = new ethers.BrowserProvider(window.ethereum);
+  const signer = await provider.getSigner();
+  return await signer.signMessage(message);
+}

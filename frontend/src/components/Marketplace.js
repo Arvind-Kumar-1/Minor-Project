@@ -1,8 +1,9 @@
 /* global BigInt */
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-hot-toast';
-import { getAllFiles, checkFileAccess, purchaseFile, getFileCID, formatEther, formatAddress } from '../utils/web3';
-import { downloadFromIPFS, getIPFSUrl } from '../utils/ipfs';
+import { getAllFiles, checkFileAccess, purchaseFile, getFileCID, formatEther, formatAddress, signMessage } from '../utils/web3';
+import { downloadFromIPFS, getIPFSUrl, downloadChunksParallel } from '../utils/ipfs';
+import { importKey, decryptFile } from '../utils/crypto';
 
 function Marketplace({ contract, account, onConnectWallet }) {
   const [files, setFiles] = useState([]);
@@ -10,6 +11,8 @@ function Marketplace({ contract, account, onConnectWallet }) {
   const [accessMap, setAccessMap] = useState({});
   const [purchasing, setPurchasing] = useState(null);
   const [downloading, setDownloading] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('All');
 
   // Fetch files on mount
   useEffect(() => {
@@ -112,43 +115,85 @@ function Marketplace({ contract, account, onConnectWallet }) {
   };
 
   const handleDownload = async (file) => {
-    if (!contract) {
-      toast.error('Contract not available');
+    if (!contract || !account) {
+      toast.error('Contract or account not available');
       return;
     }
 
     setDownloading(file.id);
     try {
+      // 1. Get the CID from the smart contract (acts as the access check)
       const cid = await getFileCID(contract, file.id);
+      toast.success(`Access verified. Requesting decryption key...`, { id: 'dl-toast' });
       
-      // Show CID info since IPFS may not be running
-      toast.success(
-        `File CID: ${cid.slice(0, 20)}...`,
-        { duration: 5000 }
-      );
-      
-      // Try to open IPFS gateway
-      const ipfsUrl = getIPFSUrl(cid);
-      
-      // Also try public IPFS gateway as fallback
-      const publicGateway = `https://ipfs.io/ipfs/${cid}`;
-      
-      // Show download options
-      const userChoice = window.confirm(
-        `File CID: ${cid}\n\n` +
-        `Choose OK to try local IPFS gateway (requires IPFS running)\n` +
-        `Choose Cancel to try public IPFS gateway\n\n` +
-        `Note: Sample files use demo CIDs and won't have actual content.`
-      );
-      
-      if (userChoice) {
-        window.open(ipfsUrl, '_blank');
-      } else {
-        window.open(publicGateway, '_blank');
+      // 2. Sign a message to prove identity to the KMS
+      const message = `Requesting access key for CID: ${cid}`;
+      const signature = await signMessage(message);
+
+      // 3. Fetch the AES encryption key from the KMS Backend
+      toast.loading('Verifying signature with KMS...', { id: 'dl-toast' });
+      const kmsResponse = await fetch('http://localhost:3001/api/kms/get-key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileId: file.id,
+          cid: cid,
+          signature: signature,
+          address: account
+        })
+      });
+
+      if (!kmsResponse.ok) {
+        const err = await kmsResponse.json();
+        throw new Error(err.error || 'Failed to get decryption key from KMS');
       }
+
+      const { aesKey } = await kmsResponse.json();
+      const cryptoKey = await importKey(aesKey);
+
+      // 4. Download the Master CID blob from IPFS
+      toast.loading('Fetching manifest...', { id: 'dl-toast' });
+      const fileResponse = await fetch(`http://localhost:3001/api/ipfs/download/${cid}`);
+      if (!fileResponse.ok) throw new Error('Failed to download file from IPFS');
+      const masterBlob = await fileResponse.blob();
+
+      let encryptedBlob;
+      
+      // Check if this is a multipath manifest by reading the first 50 bytes
+      const headerText = await masterBlob.slice(0, 50).text();
+      if (headerText.includes('multipath_v1')) {
+        const manifestText = await masterBlob.text();
+        const manifest = JSON.parse(manifestText);
+        
+        toast.loading(`Multipath Aggregation: 0/${manifest.chunks.length} chunks...`, { id: 'dl-toast' });
+        encryptedBlob = await downloadChunksParallel(manifest.chunks, (completed, total) => {
+          toast.loading(`Multipath Aggregation: ${completed}/${total} chunks...`, { id: 'dl-toast' });
+        });
+      } else {
+        // Legacy single-blob file
+        toast.loading('Downloading encrypted file from IPFS...', { id: 'dl-toast' });
+        encryptedBlob = masterBlob;
+      }
+
+      // 5. Decrypt the file locally
+      toast.loading('Decrypting file locally...', { id: 'dl-toast' });
+      const decryptedBlob = await decryptFile(encryptedBlob, cryptoKey);
+
+      // 6. Trigger standard browser download
+      toast.success('Decryption successful! Downloading...', { id: 'dl-toast' });
+      const url = URL.createObjectURL(decryptedBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      // Remove the .encrypted extension if it exists, or just use the title
+      a.download = file.title.replace(/\s+/g, '_') + '.zip'; // Defaulting to .zip for demo
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      a.remove();
+      
     } catch (error) {
       console.error('Download error:', error);
-      toast.error('Download failed: ' + error.message);
+      toast.error('Download failed: ' + error.message, { id: 'dl-toast' });
     } finally {
       setDownloading(null);
     }
@@ -197,6 +242,26 @@ function Marketplace({ contract, account, onConnectWallet }) {
         </div>
       )}
 
+      <div className="search-container">
+        <input 
+          type="text" 
+          className="search-input" 
+          placeholder="🔍 Search files by title or description..." 
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+        />
+        <select 
+          className="category-select"
+          value={categoryFilter}
+          onChange={(e) => setCategoryFilter(e.target.value)}
+        >
+          <option value="All">All Categories</option>
+          <option value="Web & Templates">Web & Templates</option>
+          <option value="Data & ML">Data & ML</option>
+          <option value="Other">Other</option>
+        </select>
+      </div>
+
       {files.length === 0 ? (
         <div className="empty-state">
           <div className="empty-state-icon">📦</div>
@@ -205,7 +270,22 @@ function Marketplace({ contract, account, onConnectWallet }) {
         </div>
       ) : (
         <div className="file-grid">
-          {files.map((file) => (
+          {files.filter(file => {
+            const matchesSearch = file.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                                  file.description.toLowerCase().includes(searchQuery.toLowerCase());
+            
+            let fileCategory = 'Other';
+            const titleLower = file.title.toLowerCase();
+            if (titleLower.includes('react') || titleLower.includes('web') || titleLower.includes('template') || titleLower.includes('node')) {
+              fileCategory = 'Web & Templates';
+            } else if (titleLower.includes('python') || titleLower.includes('ml') || titleLower.includes('data')) {
+              fileCategory = 'Data & ML';
+            }
+            
+            const matchesCategory = categoryFilter === 'All' || fileCategory === categoryFilter;
+            
+            return matchesSearch && matchesCategory;
+          }).map((file) => (
             <div key={file.id} className="file-card">
               <div className="file-preview">
                 {getFileIcon(file.title)}
